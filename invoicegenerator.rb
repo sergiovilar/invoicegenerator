@@ -5,6 +5,7 @@ require 'yaml'
 require 'trollop'
 require 'date'
 require 'money'
+require 'mail'
 I18n.enforce_available_locales = false
 
 def show_yml_example_and_exit
@@ -46,13 +47,19 @@ def read_params
     opt :client,            'Contents of client field.', type: :string
     opt :currency,          'Currency used.', type: :string, default: 'USD'
     opt :date,              'Invoice date.', type: :date, default: Date.today
-    opt 'due-date',         'Due date.', type: :date, default: (Date.today + 15)
+    opt 'due-date',         'Due date.', type: :date, default: (Date.today + 5)
     opt :from,              'Contents of from field.', type: :string
     opt :header,            'Contents of the header.', type: :string, default: 'Invoice'
     opt :notes,             'Contents of notes field.', type: :string
-    opt :number,            'Invoice number.', type: :string
-    opt 'show-yml-example', 'Show a example of a YML file that can be used by this script.'
+    opt :po,                'PO number.', type: :string
+    opt :invoice_counter,   'Invoice counter number.', type: :string
     opt :yml,               'YML file with values for parameters not given into command line.', default: 'invoice.yml'
+    opt :send_to,           'Send generated invoice to this email'
+    opt :smpt_address,      'SMTP server address'
+    opt :smpt_port,         'SMTP server port'
+    opt :smpt_user,         'SMTP user'
+    opt :smpt_password,     'SMTP password'
+    opt 'show-yml-example', 'Show a example of a YML file that can be used by this script.'
   end
 end
 
@@ -79,6 +86,9 @@ def add_extra_options(opts)
   opts[:month] = today.strftime('%B')
   opts[:past_month] = (today << 1).strftime('%B')
   opts[:year] = today.strftime('%Y')
+  opts[:smtp_port] = 587
+  opts[:smtp_authentication] = 'plain'
+  opts[:smtp_enable_starttls_auto] = true
 
   raw_balance = opts[:items].inject(0) do |balance, item|
     balance + (item[2] * item[1])
@@ -97,6 +107,13 @@ def format_items(opts)
   opts[:items] = opts[:items].join
 end
 
+def update_counter(opts)
+  opts[:number] = opts[:invoice_counter].to_s.rjust(6, "0")
+  data = YAML.load(File.read(opts[:yml]))
+  data['invoice_counter'] = opts[:invoice_counter].to_i + 1
+  File.open(opts[:yml], 'w') { |f| YAML.dump(data, f) }
+end
+
 def generate_html(opts)
   map_date_fields(opts) do |value|
     value.strftime('%B %-d, %Y')
@@ -110,6 +127,25 @@ def generate_html(opts)
   html
 end
 
+def send_email(opts)
+  return if opts[:send_to].empty? || !%i(smtp_address smtp_user smtp_password).any? { |k| opts[k.to_sym] }
+  Mail.defaults do
+    delivery_method :smtp, address: opts[:smtp_address],
+                           port: opts[:smtp_port],
+                           user_name: opts[:smtp_user],
+                           password: opts[:smtp_password],
+                           authentication: opts[:smtp_authentication],
+                           enable_starttls_auto: opts[:smtp_enable_starttls_auto]
+  end
+  Mail.deliver do
+    to opts[:send_to]
+    from opts[:send_from]
+    subject "Invoice #{opts[:number]} from #{opts[:from].split('<br />').first}"
+    body "Follows attached the Invoice #{opts[:number]} for the PO #{opts[:po]} from #{opts[:from].split('<br />').first}."
+    add_file "invoice-#{opts[:number]}.pdf"
+  end
+end
+
 def main
   opts = read_params
   show_yml_example_and_exit if opts[:'show-yml-example_given']
@@ -118,12 +154,14 @@ def main
   fix_date_options(opts)
   add_extra_options(opts)
   format_items(opts)
+  update_counter(opts)
   html = generate_html(opts)
 
   kit = PDFKit.new(html.encode('iso-8859-1'))
   name = "invoice-#{opts[:number]}.pdf"
   puts "Generating #{name}..."
   kit.to_file(name)
+  send_email(opts)
 rescue
   abort $!.message
 end
